@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import { io } from "socket.io-client";
 
-const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || "http://localhost:3001";
+const BACKEND_URL = "http://localhost:3001";
 const MAX_IMAGES = 50;
 const MAX_AUDIOS = 20;
 const MAX_VIDEOS = 10;

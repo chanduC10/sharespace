@@ -6,12 +6,14 @@ const cors = require("cors");
 const multer = require("multer");
 const { Server } = require("socket.io");
 
-const PORT = 3001;
-const FRONTEND_ORIGIN = "http://localhost:5173";
+const PORT = process.env.PORT || 3001;
 
 const app = express();
-app.use(cors({ origin: FRONTEND_ORIGIN, credentials: true }));
-app.use(express.json());
+
+// Allow ALL origins (fixes Render frontend -> backend connection)
+app.use(cors({ origin: "*" }));
+app.use(express.json({ limit: "500mb" }));
+app.use(express.urlencoded({ limit: "500mb", extended: true }));
 
 const uploadsDir = path.join(__dirname, "uploads");
 fs.mkdirSync(uploadsDir, { recursive: true });
@@ -25,73 +27,45 @@ app.get("/health", (_req, res) => {
 const server = http.createServer(app);
 
 const io = new Server(server, {
-  cors: {
-    origin: FRONTEND_ORIGIN,
-    credentials: true,
-  },
+  cors: { origin: "*" },
 });
 
 // roomId -> text
 const roomText = new Map();
-// roomId -> latest image metadata
+// roomId -> images array
 const roomImages = new Map();
 const MAX_IMAGES_PER_ROOM = 50;
-// roomId -> audio files (array)
+// roomId -> audio files array
 const roomAudios = new Map();
-// roomId -> video files (array)
+const MAX_AUDIOS_PER_ROOM = 20;
+// roomId -> video files array
 const roomVideos = new Map();
 const MAX_VIDEOS_PER_ROOM = 10;
 
 function safeExtFromMime(mime) {
   switch (mime) {
-    case "image/jpeg":
-      return ".jpg";
-    case "image/png":
-      return ".png";
-    case "image/gif":
-      return ".gif";
-    case "image/webp":
-      return ".webp";
-    case "audio/mpeg":
-      return ".mp3";
-    case "audio/wav":
-      return ".wav";
-    case "audio/x-wav":
-      return ".wav";
-    case "audio/ogg":
-      return ".ogg";
-    case "audio/mp4":
-      return ".m4a";
-    case "audio/x-m4a":
-      return ".m4a";
-    case "video/mp4":
-      return ".mp4";
-    case "video/webm":
-      return ".webm";
-    case "video/quicktime":
-      return ".mov";
-    case "video/x-matroska":
-      return ".mkv";
-    default:
-      return "";
+    case "image/jpeg": return ".jpg";
+    case "image/png": return ".png";
+    case "image/gif": return ".gif";
+    case "image/webp": return ".webp";
+    case "audio/mpeg": return ".mp3";
+    case "audio/wav": return ".wav";
+    case "audio/x-wav": return ".wav";
+    case "audio/ogg": return ".ogg";
+    case "audio/mp4": return ".m4a";
+    case "audio/x-m4a": return ".m4a";
+    case "video/mp4": return ".mp4";
+    case "video/webm": return ".webm";
+    case "video/quicktime": return ".mov";
+    case "video/x-matroska": return ".mkv";
+    default: return "";
   }
 }
 
 const allowedMimes = new Set([
-  "image/jpeg",
-  "image/png",
-  "image/gif",
-  "image/webp",
-  "audio/mpeg",
-  "audio/wav",
-  "audio/x-wav",
-  "audio/ogg",
-  "audio/mp4",
-  "audio/x-m4a",
-  "video/mp4",
-  "video/webm",
-  "video/quicktime",
-  "video/x-matroska",
+  "image/jpeg", "image/png", "image/gif", "image/webp",
+  "audio/mpeg", "audio/wav", "audio/x-wav", "audio/ogg", "audio/mp4", "audio/x-m4a",
+  "video/mp4", "video/webm", "video/quicktime", "video/x-matroska",
 ]);
 
 const upload = multer({
@@ -107,7 +81,7 @@ const upload = multer({
     cb(null, allowedMimes.has(file.mimetype));
   },
   limits: {
-    fileSize: 500 * 1024 * 1024,
+    fileSize: 500 * 1024 * 1024, // 500MB
   },
 });
 
@@ -120,86 +94,73 @@ app.post(
     { name: "video", maxCount: 1 },
   ]),
   (req, res) => {
-  const roomId = req.body?.roomId;
-  if (!roomId || typeof roomId !== "string") {
-    return res.status(400).json({ error: "roomId is required" });
-  }
+    const roomId = req.body?.roomId;
+    if (!roomId || typeof roomId !== "string") {
+      return res.status(400).json({ error: "roomId is required" });
+    }
 
-  const file =
-    req.files?.image?.[0] ||
-    req.files?.file?.[0] ||
-    req.files?.audio?.[0] ||
-    req.files?.video?.[0] ||
-    null;
-  if (!file) return res.status(400).json({ error: "file is required" });
+    const file =
+      req.files?.image?.[0] ||
+      req.files?.file?.[0] ||
+      req.files?.audio?.[0] ||
+      req.files?.video?.[0] ||
+      null;
+    if (!file) return res.status(400).json({ error: "file is required" });
 
-  const payload = {
-    roomId,
-    id: file.filename,
-    url: `/uploads/${file.filename}`,
-    name: file.originalname,
-    size: file.size,
-  };
-
-  const isAudio = typeof file.mimetype === "string" && file.mimetype.startsWith("audio/");
-  if (isAudio) {
-    const list = roomAudios.get(roomId) ?? [];
-    const next = [...list, payload];
-    roomAudios.set(roomId, next);
-
-    io.to(roomId).emit("room-audio", {
+    const payload = {
       roomId,
-      url: payload.url,
-      type: "audio",
-      filename: payload.name,
-      id: payload.id,
-      size: payload.size,
-    });
+      id: file.filename,
+      url: `/uploads/${file.filename}`,
+      name: file.originalname,
+      filename: file.originalname,
+      size: file.size,
+    };
 
-    return res.json({
-      url: payload.url,
-      type: "audio",
-      filename: payload.name,
-    });
+    const isAudio = typeof file.mimetype === "string" && file.mimetype.startsWith("audio/");
+    if (isAudio) {
+      const list = roomAudios.get(roomId) ?? [];
+      const next = [...list, payload].slice(-MAX_AUDIOS_PER_ROOM);
+      roomAudios.set(roomId, next);
+
+      io.to(roomId).emit("room-audio", {
+        roomId,
+        url: payload.url,
+        type: "audio",
+        filename: payload.name,
+        id: payload.id,
+        size: payload.size,
+      });
+
+      return res.json({ url: payload.url, type: "audio", filename: payload.name });
+    }
+
+    const isVideo = typeof file.mimetype === "string" && file.mimetype.startsWith("video/");
+    if (isVideo) {
+      const list = roomVideos.get(roomId) ?? [];
+      const next = [...list, payload].slice(-MAX_VIDEOS_PER_ROOM);
+      roomVideos.set(roomId, next);
+
+      io.to(roomId).emit("room-video", {
+        roomId,
+        url: payload.url,
+        type: "video",
+        filename: payload.name,
+        size: payload.size,
+        id: payload.id,
+      });
+
+      return res.json({ url: payload.url, type: "video", filename: payload.name, size: payload.size });
+    }
+
+    // Image
+    const list = roomImages.get(roomId) ?? [];
+    const next = [...list, payload].slice(-MAX_IMAGES_PER_ROOM);
+    roomImages.set(roomId, next);
+
+    io.to(roomId).emit("room-image", payload);
+
+    return res.json({ id: payload.id, url: payload.url, name: payload.name, size: payload.size, type: "image" });
   }
-
-  const isVideo = typeof file.mimetype === "string" && file.mimetype.startsWith("video/");
-  if (isVideo) {
-    const list = roomVideos.get(roomId) ?? [];
-    const next = [...list, payload].slice(-MAX_VIDEOS_PER_ROOM);
-    roomVideos.set(roomId, next);
-
-    io.to(roomId).emit("room-video", {
-      roomId,
-      url: payload.url,
-      type: "video",
-      filename: payload.name,
-      size: payload.size,
-      id: payload.id,
-    });
-
-    return res.json({
-      url: payload.url,
-      type: "video",
-      filename: payload.name,
-      size: payload.size,
-    });
-  }
-
-  const list = roomImages.get(roomId) ?? [];
-  const next = [...list, payload].slice(-MAX_IMAGES_PER_ROOM);
-  roomImages.set(roomId, next);
-
-  io.to(roomId).emit("room-image", payload);
-
-  return res.json({
-    id: payload.id,
-    url: payload.url,
-    name: payload.name,
-    size: payload.size,
-    type: "image",
-  });
-  },
 );
 
 function emitRoomUsers(roomId) {
@@ -236,9 +197,35 @@ io.on("connection", (socket) => {
   socket.on("text-update", ({ roomId, text }) => {
     if (!roomId || typeof roomId !== "string") return;
     if (typeof text !== "string") return;
-
     roomText.set(roomId, text);
     socket.to(roomId).emit("room-text", { roomId, text });
+  });
+
+  // 🗑️ Remove image - synced to all users
+  socket.on("remove-image", ({ roomId, imageId }) => {
+    if (!roomId || !imageId) return;
+    const list = roomImages.get(roomId) ?? [];
+    const next = list.filter((img) => img.id !== imageId);
+    roomImages.set(roomId, next);
+    io.to(roomId).emit("room-images", { roomId, images: next });
+  });
+
+  // 🗑️ Remove audio - synced to all users
+  socket.on("remove-audio", ({ roomId, audioId }) => {
+    if (!roomId || !audioId) return;
+    const list = roomAudios.get(roomId) ?? [];
+    const next = list.filter((a) => a.id !== audioId);
+    roomAudios.set(roomId, next);
+    io.to(roomId).emit("room-audios", { roomId, audios: next });
+  });
+
+  // 🗑️ Remove video - synced to all users
+  socket.on("remove-video", ({ roomId, videoId }) => {
+    if (!roomId || !videoId) return;
+    const list = roomVideos.get(roomId) ?? [];
+    const next = list.filter((v) => v.id !== videoId);
+    roomVideos.set(roomId, next);
+    io.to(roomId).emit("room-videos", { roomId, videos: next });
   });
 
   socket.on("disconnect", () => {
@@ -248,7 +235,5 @@ io.on("connection", (socket) => {
 });
 
 server.listen(PORT, () => {
-  // eslint-disable-next-line no-console
   console.log(`Backend listening on http://localhost:${PORT}`);
 });
-
